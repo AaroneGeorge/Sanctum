@@ -15,8 +15,9 @@
  *               <- { documents:[{title, content, chars, ok, error?}] }
  *   POST /upload  -> multipart/form-data with one "file" part (phone uploads; Expo-Go-safe)
  *               <- { title, content, chars, ok, error? }
- *   POST /ask     -> { question, documents:[{id?,title?,content}] }
+ *   POST /ask     -> { question, documents:[{id?,title?,content}], history?:[{role,content}] }
  *               <- { answer, citations:["DOC-01",...], requestId, stats, injectionSuspected }
+ *               (history = prior chat turns so follow-up questions keep context; corpus is re-sent)
  *
  * Design notes:
  *  - The model is loaded ONCE at startup (verified: ~54 tok/s warm on the iGPU vs reloading per call).
@@ -30,7 +31,7 @@ import { resolve } from 'node:path';
 import { loadModelLogged, profiledCompletion, unloadModelLogged } from './perflog';
 import { resolveModel, MODEL_CONFIG, GEN_PARAMS } from './models';
 import busboy from 'busboy';
-import { buildLongContextPrompt, type Doc } from './corpus';
+import { buildChatPrompt, type ChatTurn, type Doc } from './corpus';
 import { extractDoc, extractBuffer, type RawDoc } from './extract';
 
 const PORT = Number(process.env.PORT ?? 8787);
@@ -136,6 +137,58 @@ function fitDocs(docs: Doc[], budgetChars: number): { docs: Doc[]; truncated: bo
   return { docs: fitted, truncated: true };
 }
 
+/**
+ * Sanitize + budget the phone's conversation history into clean, strictly-alternating turns.
+ *
+ * The phone echoes back the whole thread, so we: (1) keep only well-formed user/assistant turns (a
+ * forged `system` turn is rejected here); (2) force strict user→assistant alternation anchored at the
+ * most recent answer — dropping the orphaned user turn a failed request leaves behind so a Qwen3-style
+ * chat template never sees two same-role turns in a row; (3) keep only the newest few turns; and
+ * (4) trim oldest user/assistant PAIRS until history fits its share of the context window, so old
+ * chatter can never crowd the documents out (they are the source of truth) or overflow the prompt.
+ * We always drop from the OLDEST end — recent turns matter most for a follow-up.
+ */
+function prepareHistory(history: unknown, allowanceChars: number, maxTurns = 6, maxCharsPerTurn = 4000): ChatTurn[] {
+  if (!Array.isArray(history)) return [];
+
+  // 1. Well-formed user/assistant turns only.
+  const cleaned: ChatTurn[] = history
+    .filter((t) => t && (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string' && t.content.trim())
+    .map((t) => ({ role: t.role as 'user' | 'assistant', content: String(t.content).trim().slice(0, maxCharsPerTurn) }));
+
+  // 2. Force strict alternation, anchored at the newest answer: walk backwards keeping the longest
+  //    user/assistant/…/assistant run, which discards orphaned or doubled-up turns.
+  const rev: ChatTurn[] = [];
+  let expect: 'user' | 'assistant' = 'assistant';
+  for (let i = cleaned.length - 1; i >= 0; i--) {
+    const turn = cleaned[i];
+    if (turn && turn.role === expect) {
+      rev.push(turn);
+      expect = expect === 'assistant' ? 'user' : 'assistant';
+    }
+  }
+  let turns = rev.reverse(); // user,assistant,…,assistant (starts user, ends assistant)
+
+  // 3. Cap the turn count (keep newest); never start on an assistant turn — it would double the ack.
+  if (turns.length > maxTurns) turns = turns.slice(turns.length - maxTurns);
+  if (turns[0]?.role === 'assistant') turns = turns.slice(1);
+
+  // 4. Trim oldest user/assistant PAIRS until history fits its allowance (keeps it alternating).
+  let total = turns.reduce((n, t) => n + t.content.length, 0);
+  while (total > allowanceChars && turns.length >= 2) {
+    const pair = turns.splice(0, 2);
+    total -= (pair[0]?.content.length ?? 0) + (pair[1]?.content.length ?? 0);
+  }
+
+  // 5. Safety net for a tiny context: if a lone surviving pair still overflows, hard-cap each turn.
+  if (total > allowanceChars && turns.length) {
+    const per = Math.max(200, Math.floor(allowanceChars / turns.length));
+    turns = turns.map((t) => ({ ...t, content: t.content.slice(0, per) }));
+  }
+
+  return turns;
+}
+
 /** Map uploaded {title,content} objects to id-tagged Docs (DOC-01, DOC-02, …). */
 function toDocs(documents: unknown): Doc[] {
   if (!Array.isArray(documents)) return [];
@@ -229,11 +282,19 @@ async function main() {
       if (!question) return json(res, 400, { error: 'question is required' });
       if (!docs.length) return json(res, 400, { error: 'at least one document with content is required' });
 
-      // Reserve room for the generated answer (predict) + system/question overhead; assume a
-      // conservative ~3 chars/token so dense clinical text never overflows the context window.
-      const budgetChars = Math.max(2000, Math.floor((MODEL_CONFIG.ctx_size - (GEN_PARAMS.predict ?? 1024) - 512) * 3));
+      // Budget the WHOLE prompt (scaffolding + docs + history) so it leaves room for the answer and
+      // never overflows the context window. ~3 chars/token is deliberately conservative for dense
+      // clinical text. Reserve: the answer (predict); fixed scaffolding (system prompt + ack + wrapper);
+      // and ~130 chars per <document> tag — otherwise fitDocs would "fit" docs that the tags push over.
+      const promptCharBudget = Math.floor((MODEL_CONFIG.ctx_size - (GEN_PARAMS.predict ?? 1024)) * 3);
+      const scaffoldChars = 1100 + 130 * docs.length;
+      const usableChars = Math.max(1500, promptCharBudget - scaffoldChars - question.length);
+      // Documents are the source of truth, so history gets at most a minority share and is trimmed first.
+      const history = prepareHistory(body.history, Math.floor(usableChars * 0.35));
+      const historyChars = history.reduce((n, t) => n + t.content.length, 0);
+      const budgetChars = Math.max(1000, usableChars - historyChars);
       const fitted = fitDocs(docs, budgetChars);
-      const messages = buildLongContextPrompt(fitted.docs, question);
+      const messages = buildChatPrompt(fitted.docs, history, question);
       try {
         const result = await enqueue(() =>
           profiledCompletion(
@@ -242,11 +303,17 @@ async function main() {
           ),
         );
         const answer = result.text.trim();
-        const citations = [...new Set(answer.match(/DOC-\d+/g) ?? [])];
-        // Heuristic flag: a doc literally trying to instruct the model is a possible injection.
-        const injectionSuspected = docs.some((d) =>
-          /ignore (all )?(previous |prior )?instructions|system prompt|you are now/i.test(d.content),
+        // Report only bracketed citations that match a real loaded document, so the phone's chips
+        // line up with the inline [DOC-xx] highlights and never show a doc that doesn't exist.
+        const known = new Set(fitted.docs.map((d) => d.id));
+        const citations = [...new Set((answer.match(/\[DOC-\d+\]/g) ?? []).map((s) => s.slice(1, -1)))].filter((id) =>
+          known.has(id),
         );
+        // Heuristic flag: text literally trying to re-instruct the model is a possible injection. Scan
+        // BOTH the documents and the replayed conversation history (a forged/echoed turn is an attack
+        // surface too, now that history is stitched into the prompt).
+        const injectionRe = /ignore (all )?(previous |prior )?instructions|system prompt|you are now/i;
+        const injectionSuspected = docs.some((d) => injectionRe.test(d.content)) || history.some((t) => injectionRe.test(t.content));
         return json(res, 200, {
           answer,
           citations,
