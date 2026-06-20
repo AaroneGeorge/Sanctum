@@ -1,0 +1,69 @@
+============================================================
+PROFILER SUMMARY
+============================================================
+
+Session:
+  Status:        enabled
+  Mode:          verbose
+  Clock:         performance (monotonic: true)
+  Events:        46
+  Dropped:       0
+
+Key Metrics:
+------------------------------------------------------------
+  Metric               Samples         Avg       Total
+------------------------------------------------------------
+  RPC Total                  3      23.18s       1.16m
+  Handler                    5      27.79s       2.32m
+
+============================================================
+
+---------------------------------------------------------------------------------------------------------------------------
+Metric                                           |        Count |          Min |          Max |          Avg |        Total
+---------------------------------------------------------------------------------------------------------------------------
+completionStream                                 |            1 |        1.13m |        1.13m |        1.13m |        1.13m
+completionStream.modelExecutionTime              |            1 |        1.13m |        1.13m |        1.13m |        1.13m
+completionStream.request.stringify               |            1 |        1.2ms |        1.2ms |        1.2ms |        1.2ms
+completionStream.request.totalSerialization      |            1 |        6.2ms |        6.2ms |        6.2ms |        6.2ms
+completionStream.request.zodValidation           |            1 |        5.0ms |        5.0ms |        5.0ms |        5.0ms
+completionStream.server.handlerExecution         |            1 |        1.13m |        1.13m |        1.13m |        1.13m
+completionStream.server.request.jsonParse        |            1 |          0μs |          0μs |          0μs |          0μs
+completionStream.server.request.zodValidation    |            1 |        4.0ms |        4.0ms |        4.0ms |        4.0ms
+completionStream.server.response.stringify       |            1 |        5.0ms |        5.0ms |        5.0ms |        5.0ms
+completionStream.server.response.zodValidation   |            1 |       49.0ms |       49.0ms |       49.0ms |       49.0ms
+completionStream.server.totalServerTime          |            1 |        1.13m |        1.13m |        1.13m |        1.13m
+completionStream.streamDuration                  |            1 |       52.67s |       52.67s |       52.67s |       52.67s
+completionStream.totalClientTime                 |            1 |        1.13m |        1.13m |        1.13m |        1.13m
+completionStream.ttfb                            |            2 |       14.94s |       14.95s |       14.95s |       29.89s
+loadModel                                        |            1 |        1.84s |        1.84s |        1.84s |        1.84s
+loadModel.modelInitializationTime                |            1 |        1.83s |        1.83s |        1.83s |        1.83s
+loadModel.request.stringify                      |            1 |         28μs |         28μs |         28μs |         28μs
+loadModel.request.totalSerialization             |            1 |        1.4ms |        1.4ms |        1.4ms |        1.4ms
+loadModel.request.zodValidation                  |            1 |        1.4ms |        1.4ms |        1.4ms |        1.4ms
+loadModel.server.handlerExecution                |            1 |        1.84s |        1.84s |        1.84s |        1.84s
+loadModel.server.request.jsonParse               |            1 |          0μs |          0μs |          0μs |          0μs
+loadModel.server.request.zodValidation           |            1 |        3.0ms |        3.0ms |        3.0ms |        3.0ms
+loadModel.server.response.stringify              |            1 |          0μs |          0μs |          0μs |          0μs
+loadModel.server.response.zodValidation          |            1 |        1.0ms |        1.0ms |        1.0ms |        1.0ms
+loadModel.server.totalServerTime                 |            1 |        1.84s |        1.84s |        1.84s |        1.84s
+loadModel.streamDuration                         |            1 |          0μs |          0μs |          0μs |          0μs
+loadModel.totalClientTime                        |            1 |        1.85s |        1.85s |        1.85s |        1.85s
+loadModel.totalLoadTime                          |            1 |        1.84s |        1.84s |        1.84s |        1.84s
+loadModel.ttfb                                   |            1 |        1.84s |        1.84s |        1.84s |        1.84s
+rpc.connection                                   |            1 |        1.32s |        1.32s |        1.32s |        1.32s
+unloadModel.clientOverhead                       |            1 |        1.7ms |        1.7ms |        1.7ms |        1.7ms
+unloadModel.request.stringify                    |            1 |          6μs |          6μs |          6μs |          6μs
+unloadModel.request.totalSerialization           |            1 |        977μs |        977μs |        977μs |        977μs
+unloadModel.request.zodValidation                |            1 |        970μs |        970μs |        970μs |        970μs
+unloadModel.response.jsonParse                   |            1 |         17μs |         17μs |         17μs |         17μs
+unloadModel.response.totalParsing                |            1 |        285μs |        285μs |        285μs |        285μs
+unloadModel.response.zodValidation               |            1 |        269μs |        269μs |        269μs |        269μs
+unloadModel.server.handlerExecution              |            1 |       69.0ms |       69.0ms |       69.0ms |       69.0ms
+unloadModel.server.request.jsonParse             |            1 |          0μs |          0μs |          0μs |          0μs
+unloadModel.server.request.zodValidation         |            1 |        2.0ms |        2.0ms |        2.0ms |        2.0ms
+unloadModel.server.response.stringify            |            1 |          0μs |          0μs |          0μs |          0μs
+unloadModel.server.response.zodValidation        |            1 |        1.0ms |        1.0ms |        1.0ms |        1.0ms
+unloadModel.server.totalServerTime               |            1 |       72.0ms |       72.0ms |       72.0ms |       72.0ms
+unloadModel.serverWait                           |            1 |       72.3ms |       72.3ms |       72.3ms |       72.3ms
+unloadModel.totalClientTime                      |            1 |       73.7ms |       73.7ms |       73.7ms |       73.7ms
+---------------------------------------------------------------------------------------------------------------------------

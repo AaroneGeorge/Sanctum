@@ -1,0 +1,35 @@
+{
+  "project": "Sanctum",
+  "sdkVersion": "@qvac/sdk@0.12.2",
+  "policy": "All AI inference (LLM generation, embeddings, RAG retrieval, any reasoning) is performed locally on the user's own machine via the QVAC SDK. No prompt, document, embedding, or model output is ever sent to any cloud or third-party server. The only runtime network traffic is an OPTIONAL companion phone app talking to the inference server on the user's OWN local Wi-Fi (LAN); it never leaves the local network. This file is the structured disclosure required by the QVAC hackathon Official Rules.",
+  "runtime_remote_ai_calls": [],
+  "runtime_remote_non_ai_calls": [
+    {
+      "purpose": "OPTIONAL companion phone app (Expo/React Native, mobile/) uploads the user-selected document files to the Sanctum server (src/server.ts) on the user's own laptop to extract their text (POST /upload as multipart/form-data — the Expo-Go-safe path — or POST /extract as base64 JSON; .pdf/.docx/.doc/.txt/.md handled by pure-JS libraries on the laptop), then sends the user's question + extracted text (POST /ask) and receives the cited answer back. This is a local-network transport only — it stays on the user's Wi-Fi and never reaches any cloud or third-party server. The AI inference itself is still performed 100% locally on the laptop via @qvac/sdk; no model input or output leaves the local network.",
+      "endpoints": [
+        "http://<laptop-lan-ip>:8787/health",
+        "http://<laptop-lan-ip>:8787/upload",
+        "http://<laptop-lan-ip>:8787/extract",
+        "http://<laptop-lan-ip>:8787/ask"
+      ],
+      "transport": "HTTP over local Wi-Fi (LAN); server bound to 0.0.0.0:8787; no TLS (local-only)",
+      "invoked_by": "mobile/App.tsx (Expo client) -> src/server.ts",
+      "destination": "self-hosted on the user's own laptop, same local network (no internet egress)",
+      "data_sent": "user-selected document files (raw bytes, base64), the extracted document text, and the user's question",
+      "ai_inference": false,
+      "ai_inference_location": "performed locally on the laptop via @qvac/sdk; the model, prompt, and all generation stay on-device"
+    }
+  ],
+  "setup_only_remote_calls": [
+    {
+      "purpose": "One-time download of open-source model weights (Apache-2.0). Build/setup step only — NOT invoked at runtime.",
+      "endpoints": [
+        "https://huggingface.co/qvac/MedPsy-1.7B-GGUF/resolve/main/medpsy-1.7b-q4_k_m-imat.gguf",
+        "https://huggingface.co/qvac/MedPsy-4B-GGUF/resolve/main/medpsy-4b-q4_k_m-imat.gguf"
+      ],
+      "invoked_by": "scripts/download-models.sh",
+      "ai_inference": false
+    }
+  ],
+  "verification_note": "All AI inference runs locally via @qvac/sdk; the model and all prompt/output data stay on the user's own machine. The only runtime traffic is the optional phone app talking to this same machine over the local network (http://<laptop-lan-ip>:8787). Reviewers can confirm there is NO internet/cloud egress by blocking the laptop's outbound internet while keeping the LAN up and running the demo end-to-end — the CLI (`npm run smoke` / `npm run ask`) and the phone app both keep working fully offline."
+}

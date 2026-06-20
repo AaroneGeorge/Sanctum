@@ -1,0 +1,2 @@
+41ee947d9cce72ec657577219fd1798fabeabf0d832217fe23c9d6d3d18d5880  models/medpsy-1.7b-q4_k_m-imat.gguf
+2ecbf622a2856f631001f20f593669aa03acba39977f521bef80cd8600864980  models/medpsy-4b-q4_k_m-imat.gguf
