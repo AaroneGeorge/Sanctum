@@ -2,34 +2,26 @@
   "name": "sanctum",
   "version": "0.1.0",
   "private": true,
-  "description": "Sanctum monorepo — a fully-offline, long-context private records analyst built on the QVAC SDK. Tether QVAC 'Unleash Edge AI' hackathon (Track: General Purpose). Workspaces: apps/server (on-device inference server) + apps/mobile (Expo app).",
+  "description": "Sanctum monorepo — a fully-offline, long-context private records analyst built on the QVAC SDK. Tether QVAC 'Unleash Edge AI' hackathon (Track: General Purpose). apps/server (on-device inference server) + apps/mobile (Expo app). Each app is a SELF-CONTAINED install — npm workspaces are intentionally NOT used because Expo/React Native breaks under dependency hoisting.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22.17"
   },
-  "workspaces": [
-    "apps/server",
-    "apps/mobile"
-  ],
   "scripts": {
-    "serve": "npm run serve --workspace @sanctum/server",
-    "start": "concurrently --kill-others-on-fail -n server,mobile -c blue,magenta \"npm run serve\" \"npm run mobile\"",
-    "smoke": "npm run smoke --workspace @sanctum/server",
-    "ask": "npm run ask --workspace @sanctum/server --",
-    "doctor": "npm run doctor --workspace @sanctum/server",
-    "models": "npm run models --workspace @sanctum/server",
-    "mobile": "npm run start --workspace @sanctum/mobile",
-    "mobile:android": "npm run android --workspace @sanctum/mobile",
-    "mobile:ios": "npm run ios --workspace @sanctum/mobile",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "postinstall": "cd apps/server && npm install && cd ../mobile && npm install",
+    "serve": "cd apps/server && npm run serve",
+    "start": "trap 'kill 0' EXIT; ( cd apps/server && npm run serve ) > sanctum-server.log 2>&1 & echo 'Sanctum server starting in the background → logs: sanctum-server.log' && cd apps/mobile && npx expo start",
+    "smoke": "cd apps/server && npm run smoke",
+    "ask": "cd apps/server && npm run ask --",
+    "doctor": "cd apps/server && npm run doctor",
+    "models": "cd apps/server && npm run models",
+    "mobile": "cd apps/mobile && npx expo start",
+    "//mobile:android": "disabled — run `npm run mobile`, then press 'a' in Expo (or `cd apps/mobile && npx expo start --android`).",
+    "//mobile:ios": "disabled — run `npm run mobile`, then press 'i' in Expo (or `cd apps/mobile && npx expo start --ios`).",
+    "typecheck": "cd apps/server && npm run typecheck",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up --build",
     "docker:up:web": "docker compose --profile websearch up --build",
     "docker:down": "docker compose down"
-  },
-  "devDependencies": {
-    "concurrently": "^9.2.0",
-    "react": "19.2.3",
-    "react-native": "0.85.3"
   }
 }

@@ -15,7 +15,7 @@ over a whole corpus of records and returns **cited** answers, fully offline.
 
 ## Repository layout
 
-Sanctum is an **npm-workspaces monorepo** with two apps:
+Sanctum is a monorepo with two **self-contained** apps:
 
 ```
 sanctum/
@@ -32,16 +32,17 @@ sanctum/
 ├── docs/              project docs (DEMO-TEST-CASES.md)
 ├── docker-compose.yml server (+ optional SearXNG) orchestration
 ├── tsconfig.base.json shared TS config
-└── package.json       workspace root + delegating scripts
+└── package.json       root orchestrator — delegating scripts, no shared deps
 ```
 
-Both apps install from a single `npm install` at the root. Root scripts delegate to the right
-workspace, so the commands below are run from the repo root.
+A single `npm install` at the root installs **both** apps: the root has no dependencies of its own —
+its `postinstall` runs `npm install` inside `apps/server` and `apps/mobile`, so each app gets its own
+self-contained `node_modules` + lockfile. Root scripts (`npm run serve`, `npm run mobile`, …) just
+`cd` into the right app, so every command below runs from the repo root.
 
-> **Note:** the root `package.json` pins `react`/`react-native` (the Expo SDK 56 versions) as
-> devDependencies on purpose. Expo's `react-native: "*"` peer ranges otherwise let npm hoist a
-> newer React Native than the app, loading two copies in one Metro graph (the "Invalid hook call"
-> crash). Don't remove the pin.
+> **Why no npm workspaces?** Expo / React Native break under dependency hoisting — Metro loads two
+> copies of React ("Invalid hook call"), or `babel-preset-expo` can't resolve its `@react-native/*`
+> plugins. Keeping each app as a separate install sidesteps that entirely; it's what Expo expects.
 
 ## Why this is different
 - **100% on-device.** No prompt, document, embedding, or model output ever touches a network at
@@ -60,27 +61,29 @@ workspace, so the commands below are run from the repo root.
 
 ## Quick start
 ```bash
-npm install                 # installs BOTH workspaces (~3.7 GB — QVAC bundles all native runtimes)
+npm install                 # installs BOTH apps (~3.7 GB — QVAC bundles all native runtimes)
 npm run doctor              # optional: validate host + GPU (needs @qvac/cli)
 npm run models              # downloads MedPsy-1.7B GGUF (~1.28 GB)  [DL_4B=1 to also get 4B]
 npm run smoke               # Day-0 verification: load model + one logged completion
 npm run ask -- "What medications were discontinued, and why? Cite documents."
 ```
 
-Each root script just forwards to `@sanctum/server`. To target a workspace explicitly, use
-`-w`, e.g. `npm run ask -w @sanctum/server -- "…"`. `npm run typecheck` type-checks every
-workspace that defines the script.
+Each root script just `cd`s into the right app. To run a command in one app directly, `cd` into it —
+e.g. `cd apps/server && npm run ask -- "…"` or `cd apps/server && npm run typecheck`.
 
 To run the phone app (Expo) against your laptop's server:
 ```bash
 # point the app at your laptop first:  apps/mobile/.env → EXPO_PUBLIC_SERVER_URL=http://<laptop-LAN-ip>:8787
-npm start                   # runs BOTH the server and `expo start` together (labeled [server]/[mobile])
-# …or run them individually:
-npm run serve               # just the server; note the "on LAN" URL it prints
+npm start                   # Expo in the FOREGROUND (scannable QR + a/i/r keys) + server in the background
+                            #   server logs → sanctum-server.log ;  Ctrl+C stops both
+# …or run them in two terminals:
+npm run serve               # just the server (logs in the foreground); note the "on LAN" URL it prints
 npm run mobile              # just `expo start` (scan the QR with Expo Go on a phone on the SAME Wi-Fi)
 ```
-> `npm start` uses `concurrently`. Scanning the QR works as usual; if you need Expo's interactive
-> terminal keys (`a`/`i`/`r`), run `npm run mobile` on its own.
+> Expo needs its own terminal (TTY) to render a scannable QR, so `npm start` runs it in the foreground
+> and keeps the server in the background (logging to `sanctum-server.log`). Running it under a parallel
+> runner like `concurrently` denies Expo a TTY — the QR never shows. Prefer separate windows? Run
+> `npm run serve` and `npm run mobile` in two terminals.
 
 ### GPU vs CPU
 QVAC's Linux GPU backend is **Vulkan** (not CUDA). Start CPU-first; once `npm run doctor` confirms
