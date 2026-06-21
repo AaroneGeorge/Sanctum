@@ -18,6 +18,11 @@
  *   POST /ask     -> { question, documents:[{id?,title?,content}], history?:[{role,content}] }
  *               <- { answer, citations:["DOC-01",...], requestId, stats, injectionSuspected }
  *               (history = prior chat turns so follow-up questions keep context; corpus is re-sent)
+ *   POST /ask/web -> same body as /ask. OPT-IN web-augmented mode. Streams Server-Sent Events:
+ *               <- event: status {phase,message}   (live one-line "thinking" updates)
+ *               <- event: done   {answer, citations, sources:[{id,title,url,snippet}], stats, …}
+ *               The on-device model writes DE-IDENTIFIED queries; only those strings hit the web —
+ *               the patient document never leaves. No provider key => degrades to on-device-only.
  *
  * Design notes:
  *  - The model is loaded ONCE at startup (verified: ~54 tok/s warm on the iGPU vs reloading per call).
@@ -31,8 +36,17 @@ import { resolve } from 'node:path';
 import { loadModelLogged, profiledCompletion, unloadModelLogged } from './perflog';
 import { resolveModel, MODEL_CONFIG, GEN_PARAMS } from './models';
 import busboy from 'busboy';
-import { buildChatPrompt, type ChatTurn, type Doc } from './corpus';
+import { buildChatPrompt, buildWebAugmentedPrompt, type ChatTurn, type Doc } from './corpus';
 import { extractDoc, extractBuffer, type RawDoc } from './extract';
+import { generateSearchQueries } from './webagent';
+import {
+  webSearch,
+  webSearchAvailable,
+  previewQueries,
+  searchProviderName,
+  MAX_SNIPPET_CHARS,
+  type WebSource,
+} from './search';
 
 const PORT = Number(process.env.PORT ?? 8787);
 const LOG = 'artifacts/perf-log.jsonl';
@@ -65,6 +79,23 @@ function json(res: ServerResponse, code: number, body: unknown): void {
   cors(res);
   res.writeHead(code, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(body));
+}
+
+/** Open a Server-Sent Events stream and flush headers so the phone shows status without waiting. */
+function sseInit(res: ServerResponse): void {
+  cors(res);
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no', // tell any reverse proxy not to buffer the stream
+  });
+  res.write(': connected\n\n'); // comment frame flushes headers immediately
+}
+
+/** Write one SSE frame (`event: <name>\ndata: <json>\n\n`). */
+function sseSend(res: ServerResponse, event: string, data: unknown): void {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
 function readJson(req: IncomingMessage): Promise<any> {
@@ -135,6 +166,35 @@ function fitDocs(docs: Doc[], budgetChars: number): { docs: Doc[]; truncated: bo
     return { ...d, content };
   });
   return { docs: fitted, truncated: true };
+}
+
+/**
+ * Budget BOTH the documents and the web snippets into a combined char budget. Documents stay the source
+ * of truth (priority), so web sources get at most a ~30% minority share and are trimmed first/harder;
+ * each web snippet is also hard-capped. Mirrors fitDocs' proportional trimming for the web side.
+ */
+function fitDocsAndWeb(
+  docs: Doc[],
+  sources: WebSource[],
+  budgetChars: number,
+): { docs: Doc[]; sources: WebSource[]; truncated: boolean } {
+  const rawOf = (s: WebSource) => s.content ?? s.snippet;
+  const totalWeb = sources.reduce((n, s) => n + rawOf(s).length, 0);
+  // Web gets at most 30% of the budget (and never more than it actually needs); docs get the rest.
+  const webBudget = Math.min(Math.floor(budgetChars * 0.3), totalWeb);
+  const fittedDocs = fitDocs(docs, Math.max(1000, budgetChars - webBudget));
+
+  let webTrunc = false;
+  const fittedSources = sources.map((s) => {
+    const raw = rawOf(s);
+    const share =
+      totalWeb > webBudget ? Math.max(160, Math.floor((raw.length / totalWeb) * webBudget)) : raw.length;
+    const snippet = raw.length > share ? `${raw.slice(0, share)}…` : raw;
+    if (raw.length > share) webTrunc = true;
+    return { ...s, snippet, content: undefined };
+  });
+
+  return { docs: fittedDocs.docs, sources: fittedSources, truncated: fittedDocs.truncated || webTrunc };
 }
 
 /**
@@ -326,6 +386,122 @@ async function main() {
         console.error('ask error:', e);
         return json(res, 500, { error: e?.message ?? 'inference failed' });
       }
+    }
+
+    // WEB-AUGMENTED ask (opt-in). Streams the agent's progress as Server-Sent Events so the phone can
+    // show a single live "thinking" line, then a final `done` frame with the answer + web sources.
+    //
+    // Flow: analyze (on-device query-gen) → web search (de-identified queries only; NO model, so the
+    // inference lock is released) → synthesize (on-device). The patient document NEVER leaves the
+    // machine — only the de-identified query strings do. With no provider configured, every phase
+    // degrades to an on-device-only answer and ZERO external calls are made.
+    if (req.method === 'POST' && req.url === '/ask/web') {
+      let body: any;
+      try {
+        body = await readJson(req);
+      } catch (e: any) {
+        return json(res, 400, { error: e?.message ?? 'bad request' });
+      }
+      const question = typeof body.question === 'string' ? body.question.trim() : '';
+      const docs = toDocs(body.documents);
+      if (!question) return json(res, 400, { error: 'question is required' });
+      if (!docs.length) return json(res, 400, { error: 'at least one document with content is required' });
+
+      sseInit(res);
+      let closed = false;
+      req.on('close', () => {
+        closed = true;
+      });
+      const ka = setInterval(() => {
+        if (!closed) res.write(': keep-alive\n\n');
+      }, 15000);
+      const status = (phase: string, message: string) => {
+        if (!closed) sseSend(res, 'status', { phase, message });
+      };
+      const finish = (event: string, payload: unknown) => {
+        clearInterval(ka);
+        if (!closed) {
+          sseSend(res, event, payload);
+          res.end();
+        }
+      };
+
+      try {
+        // ── Phase 1: on-device query generation (MODEL CALL — through enqueue) ──
+        status('analyze', 'Analyzing the patient document…');
+        let queries: string[] = [];
+        if (webSearchAvailable()) {
+          queries = await enqueue(() => generateSearchQueries(modelId, docs, question, LOG, model.name));
+        }
+        if (closed) return clearInterval(ka);
+
+        // ── Phase 2: web search (NO model — runs OUTSIDE the inference lock) ──
+        let sources: WebSource[] = [];
+        const sent = previewQueries(queries); // exactly what will leave the device, after de-identification
+        if (sent.length) {
+          for (const q of sent) status('search', `Searching the web: ${q}…`);
+          sources = await webSearch(queries);
+          status(
+            'read',
+            sources.length
+              ? `Reading ${sources.length} source${sources.length === 1 ? '' : 's'}…`
+              : 'No web results — answering from your records only…',
+          );
+        } else if (!webSearchAvailable()) {
+          status('offline', 'Web search not configured — answering from your records only…');
+        } else {
+          status('offline', 'No safe web queries — answering from your records only…');
+        }
+        if (closed) return clearInterval(ka);
+
+        // ── Budget: docs are source of truth; web snippets get a capped minority share ──
+        const promptCharBudget = Math.floor((MODEL_CONFIG.ctx_size - (GEN_PARAMS.predict ?? 1024)) * 3);
+        const scaffoldChars = 1400 + 130 * docs.length + 90 * sources.length;
+        const usableChars = Math.max(1500, promptCharBudget - scaffoldChars - question.length);
+        const history = prepareHistory(body.history, Math.floor(usableChars * 0.3));
+        const historyChars = history.reduce((n, t) => n + t.content.length, 0);
+        const fitted = fitDocsAndWeb(docs, sources, Math.max(1000, usableChars - historyChars));
+
+        // ── Phase 3: synthesis (MODEL CALL — through enqueue) ──
+        status('compose', 'Composing the answer…');
+        const messages = buildWebAugmentedPrompt(fitted.docs, fitted.sources, history, question);
+        const result = await enqueue(() =>
+          profiledCompletion(
+            { modelId, history: messages, generationParams: GEN_PARAMS, captureThinking: true },
+            { logPath: LOG, modelName: model.name },
+          ),
+        );
+        if (closed) return clearInterval(ka);
+
+        const answer = result.text.trim();
+        const knownDoc = new Set(fitted.docs.map((d) => d.id));
+        const citations = [...new Set((answer.match(/\[DOC-\d+\]/g) ?? []).map((s) => s.slice(1, -1)))].filter(
+          (id) => knownDoc.has(id),
+        );
+        // Web is an attack surface too: scan documents, web snippets, and replayed history for injection.
+        const injectionRe = /ignore (all )?(previous |prior )?instructions|system prompt|you are now/i;
+        const injectionSuspected =
+          docs.some((d) => injectionRe.test(d.content)) ||
+          fitted.sources.some((s) => injectionRe.test(s.snippet)) ||
+          history.some((t) => injectionRe.test(t.content));
+
+        finish('done', {
+          answer,
+          citations,
+          // Return ALL consulted sources (Perplexity-style) so the doctor sees what was read; inline
+          // [WEB-n] markers in the answer link into this list. URLs included for clickable citations.
+          sources: fitted.sources.map(({ id, title, url, snippet }) => ({ id, title, url, snippet })),
+          provider: sources.length ? searchProviderName() : null,
+          injectionSuspected,
+          truncated: fitted.truncated,
+          requestId: result.requestId ?? null,
+          stats: result.stats ?? null,
+        });
+      } catch (e: any) {
+        console.error('ask/web error:', e);
+        finish('error', { error: e?.message ?? 'inference failed' });
+      }
+      return;
     }
 
     return json(res, 404, { error: 'not found' });
