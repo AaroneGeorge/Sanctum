@@ -15,8 +15,10 @@ over a whole corpus of records and returns **cited** answers, fully offline.
 
 ## Why this is different
 - **100% on-device.** No prompt, document, embedding, or model output ever touches a network at
-  runtime. See [`remote-api-calls.json`](./remote-api-calls.json) — the runtime remote-call list is empty.
-  Verify it yourself: disconnect the network and run the demo.
+  runtime. See [`remote-api-calls.json`](./remote-api-calls.json) — the runtime remote **AI**-call list is
+  empty and all inference is local. Verify it yourself: disconnect the network and run the demo.
+  *(The optional [web-augmented mode](#web-augmented-mode-optional) is opt-in and off by default; even
+  when on, only de-identified search queries — never the patient document — leave the device.)*
 - **Long context on modest hardware.** Built around QVAC's TurboQuant KV-cache compression so a large
   corpus fits in context on a 4 GB GPU. *(in progress — see PLAN.md)*
 - **Small model, real quality.** MedPsy-4B edges MedGemma-27B on Tether's medical benchmarks at ~7× smaller.
@@ -58,6 +60,35 @@ QVAC_DEVICE=gpu QVAC_GPU_LAYERS=999 QVAC_CTX=16384 npm run ask -- "…"
    through MedPsy via the QVAC SDK.
 3. `perflog.ts` streams the completion, joins the SDK's `completion().stats` (TTFT, tokens/sec,
    token counts) with model load/unload events, and writes a compliant machine-readable log.
+
+## Web-augmented mode (optional)
+Document-only analysis can't know the *latest* guidelines or drug-interaction data. The opt-in
+**🌐 deep research** mode in the phone app fuses the private record with current web literature —
+without ever uploading the patient's document. It runs an on-device → web → on-device agent:
+
+1. **Analyze (on-device).** MedPsy reads the record locally and writes 1–4 **general, de-identified**
+   medical search queries (`src/webagent.ts`). The document never leaves the machine.
+2. **Search (web).** Only those query *strings* go out — and each is run through a regex PHI scrubber
+   (`deidentify()` in `src/search.ts`) first. Provider is pluggable: **Tavily** (default), **Brave**, or a
+   self-hosted **SearXNG** (no third party). The phone shows each query live, so you see exactly what left.
+3. **Synthesize (on-device).** MedPsy answers from the record **plus** the web results, citing patient
+   facts as `[DOC-xx]` and literature as `[WEB-n]`, with Perplexity-style clickable sources.
+
+The server streams the agent's progress over SSE (`POST /ask/web`) so the app can show a single live
+"thinking" line. **Default off** — with no key configured the mode degrades to an on-device-only answer
+and makes **zero** external calls, so the offline guarantee above is untouched.
+
+```bash
+# Enable it by giving the server a search key (see .env.example). Inference stays 100% local.
+SEARCH_PROVIDER=tavily SEARCH_API_KEY=tvly-… npm run serve
+```
+
+| env var | default | meaning |
+|---|---|---|
+| `SEARCH_PROVIDER` | `tavily` | `tavily` \| `brave` \| `searxng` |
+| `SEARCH_API_KEY` | — | Tavily/Brave key (unset ⇒ mode stays offline) |
+| `SEARCH_ENDPOINT` | — | SearXNG base URL (only for `searxng`) |
+| `SEARCH_TIMEOUT_MS` | `6000` | per-request web-search timeout |
 
 ## Prior work disclosure
 Built from scratch during the hackathon period (June 2026). No pre-existing codebase. Dependencies:

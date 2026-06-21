@@ -1,7 +1,7 @@
 {
   "project": "Sanctum",
   "sdkVersion": "@qvac/sdk@0.12.2",
-  "policy": "All AI inference (LLM generation, embeddings, RAG retrieval, any reasoning) is performed locally on the user's own machine via the QVAC SDK. No prompt, document, embedding, or model output is ever sent to any cloud or third-party server. The only runtime network traffic is an OPTIONAL companion phone app talking to the inference server on the user's OWN local Wi-Fi (LAN); it never leaves the local network. This file is the structured disclosure required by the QVAC hackathon Official Rules.",
+  "policy": "All AI inference (LLM generation, embeddings, RAG retrieval, any reasoning) is performed locally on the user's own machine via the QVAC SDK. No prompt, document, embedding, or model output is ever sent to any cloud or third-party server. The only base runtime network traffic is an OPTIONAL companion phone app talking to the inference server on the user's OWN local Wi-Fi (LAN); it never leaves the local network. SEPARATELY, an OPTIONAL, opt-in 'web-augmented' answering mode (default OFF) may send DE-IDENTIFIED, GENERAL medical search query STRINGS (never patient data) to a configurable web-search provider; all AI inference still runs 100% locally. This file is the structured disclosure required by the QVAC hackathon Official Rules.",
   "runtime_remote_ai_calls": [],
   "runtime_remote_non_ai_calls": [
     {
@@ -18,6 +18,20 @@
       "data_sent": "user-selected document files (raw bytes, base64), the extracted document text, and the user's question",
       "ai_inference": false,
       "ai_inference_location": "performed locally on the laptop via @qvac/sdk; the model, prompt, and all generation stay on-device"
+    },
+    {
+      "purpose": "OPTIONAL, opt-in 'web-augmented' answering mode (POST /ask/web; default OFF, toggled per-question in the phone app). When the clinician enables it, the ON-DEVICE model FIRST reads the patient document locally and generates 1-4 DE-IDENTIFIED, GENERAL medical search queries (about conditions, medications, guidelines, interactions). Those query STRINGS — and ONLY those strings — are sent to a pluggable web-search provider to retrieve public clinical literature. The on-device model then synthesizes an answer from the private records PLUS the web results, citing patient facts as [DOC-xx] and literature as [WEB-n]. The patient document content, the prompt, the model output, embeddings, and any identifiers are NEVER sent to the web provider. Every query also passes through a regex PHI scrubber (deidentify() in src/search.ts) before egress as defense in depth. If no provider key/endpoint is configured, or the search fails/times out, the mode degrades to an on-device-only answer with NO external call.",
+      "endpoints": [
+        "https://api.tavily.com/search  (only if SEARCH_PROVIDER=tavily, the default)",
+        "https://api.search.brave.com/res/v1/web/search  (only if SEARCH_PROVIDER=brave)",
+        "<self-hosted SearXNG SEARCH_ENDPOINT>/search  (only if SEARCH_PROVIDER=searxng — zero third parties)"
+      ],
+      "transport": "HTTPS via Node's built-in fetch; outbound to the configured provider only",
+      "invoked_by": "src/server.ts (POST /ask/web) -> src/webagent.ts (on-device query-gen) -> src/search.ts (web call)",
+      "destination": "third-party web-search provider chosen by the operator (Tavily by default), or a self-hosted SearXNG with no third parties",
+      "data_sent": "ONLY de-identified, general medical search query strings (e.g. 'metformin lisinopril interaction'). NO patient document content, NO identifiers, NO prompt, NO model output.",
+      "ai_inference": false,
+      "ai_inference_location": "all generation (query-gen AND answer synthesis) is performed locally on the laptop via @qvac/sdk; only keyword search runs remotely"
     }
   ],
   "setup_only_remote_calls": [
@@ -31,5 +45,5 @@
       "ai_inference": false
     }
   ],
-  "verification_note": "All AI inference runs locally via @qvac/sdk; the model and all prompt/output data stay on the user's own machine. The only runtime traffic is the optional phone app talking to this same machine over the local network (http://<laptop-lan-ip>:8787). Reviewers can confirm there is NO internet/cloud egress by blocking the laptop's outbound internet while keeping the LAN up and running the demo end-to-end — the CLI (`npm run smoke` / `npm run ask`) and the phone app both keep working fully offline."
+  "verification_note": "All AI inference runs locally via @qvac/sdk; the model and all prompt/output data stay on the user's own machine. With the web-augmented mode OFF (the default), the only runtime traffic is the optional phone app talking to this same machine over the local network (http://<laptop-lan-ip>:8787). Reviewers can confirm there is NO internet/cloud egress by blocking the laptop's outbound internet while keeping the LAN up and running the demo end-to-end — the CLI (`npm run smoke` / `npm run ask`) and the phone app both keep working fully offline. For the opt-in web-augmented mode: reviewers can confirm NO PHI egress by leaving SEARCH_API_KEY unset (the mode auto-degrades to offline and makes zero external calls), or by pointing SEARCH_PROVIDER=searxng at a self-hosted instance and inspecting the query strings — only general medical terms (de-identified by the on-device model and the deidentify() scrubber) ever leave; the patient document never does."
 }

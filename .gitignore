@@ -8,3 +8,5 @@ artifacts/*.jsonl
 artifacts/profiler.json
 *.log
 .DS_Store
+
+.env
