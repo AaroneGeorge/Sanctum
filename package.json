@@ -28,6 +28,8 @@
     "docker:down": "docker compose down"
   },
   "devDependencies": {
-    "concurrently": "^9.2.0"
+    "concurrently": "^9.2.0",
+    "react": "19.2.3",
+    "react-native": "0.85.3"
   }
 }

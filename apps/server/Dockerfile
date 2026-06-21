@@ -3,7 +3,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Sanctum on-device inference server (apps/server).
 #
-# Build from the REPO ROOT so the monorepo manifests + lockfile are in context:
+# Build from the REPO ROOT so apps/server is in the build context:
 #   docker build -f apps/server/Dockerfile -t sanctum-server .
 # or simply:  docker compose up --build
 #
@@ -21,16 +21,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates libgomp1 \
  && rm -rf /var/lib/apt/lists/*
 
-# ── deps: install ONLY the @sanctum/server workspace (skip the RN/Expo app) ──
+# ── deps: install ONLY the server's own dependency closure ──
+# apps/server is installed as a STANDALONE package here (its package.json becomes the
+# image root), so npm never resolves the mobile workspace's React Native / Metro / Babel
+# tree into the server image. @qvac/sdk is pinned exactly (0.12.2) so inference is
+# reproducible; the dev dep `tsx` is kept because it runs the TypeScript directly at runtime.
 FROM base AS deps
-# Copy manifests first for layer caching. The mobile manifest is copied so npm can
-# parse the workspace graph; --workspace scopes the install to the server only.
-COPY package.json package-lock.json ./
-COPY apps/server/package.json apps/server/package.json
-COPY apps/mobile/package.json apps/mobile/package.json
-# tsx runs the TypeScript directly at runtime, so dev deps are intentionally included.
+COPY apps/server/package.json ./package.json
 RUN --mount=type=cache,target=/root/.npm \
-    npm install --workspace @sanctum/server --include-workspace-root
+    npm install --no-audit --no-fund
 
 # ── runtime ──
 FROM base AS runtime
@@ -38,8 +37,8 @@ ENV NODE_ENV=production \
     PORT=8787 \
     QVAC_DEVICE=cpu \
     QVAC_GPU_LAYERS=0
+# Server-only node_modules from the deps stage (resolved from /app/node_modules at runtime).
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json package-lock.json ./
 COPY apps/server ./apps/server
 # Mount points for large weights + the writable forensic perf-log (compose binds host dirs here).
 RUN mkdir -p apps/server/models apps/server/artifacts

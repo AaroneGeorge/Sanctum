@@ -38,6 +38,11 @@ sanctum/
 Both apps install from a single `npm install` at the root. Root scripts delegate to the right
 workspace, so the commands below are run from the repo root.
 
+> **Note:** the root `package.json` pins `react`/`react-native` (the Expo SDK 56 versions) as
+> devDependencies on purpose. Expo's `react-native: "*"` peer ranges otherwise let npm hoist a
+> newer React Native than the app, loading two copies in one Metro graph (the "Invalid hook call"
+> crash). Don't remove the pin.
+
 ## Why this is different
 - **100% on-device.** No prompt, document, embedding, or model output ever touches a network at
   runtime. See [`remote-api-calls.json`](./remote-api-calls.json) — the runtime remote **AI**-call list is
@@ -63,7 +68,8 @@ npm run ask -- "What medications were discontinued, and why? Cite documents."
 ```
 
 Each root script just forwards to `@sanctum/server`. To target a workspace explicitly, use
-`-w`, e.g. `npm run ask -w @sanctum/server -- "…"` or `npm run typecheck --workspaces`.
+`-w`, e.g. `npm run ask -w @sanctum/server -- "…"`. `npm run typecheck` type-checks every
+workspace that defines the script.
 
 To run the phone app (Expo) against your laptop's server:
 ```bash
