@@ -250,20 +250,59 @@ into the right app, so every command in this README runs from the repo root.
 
 ## Demo walkthrough (screenshots & video)
 
-> 📽 **Video:** _<!-- TODO: add the demo video link here -->_
->
-> 🖼 **Screenshots** live in [`assets/`](./assets) — _<!-- TODO: drop images in `assets/` and link them below -->_
+> 📽 **Video demo:** [Watch on YouTube ↗](https://www.youtube.com/shorts/6TrYZ-uAV_Y)
 
-A suggested walkthrough (mirrors [`docs/DEMO-TEST-CASES.md`](./docs/DEMO-TEST-CASES.md)):
+---
 
-| Step | What to show | Screenshot |
-|---|---|---|
-| 1 | **Offline proof** — disconnect the network, then run the demo and get a full cited answer. | `assets/01-offline.png` |
-| 2 | **Phone upload** — pick a PDF/record; the app confirms title + character count. | `assets/02-upload.png` |
-| 3 | **Cited answer** — ask a cross-document question; tap a blue `[DOC-xx]` chip. | `assets/03-citations.png` |
-| 4 | **Injection refused** — load `03-scanned-note-with-injection.md`; the answer shows the ⚠ banner and still cites correctly. | `assets/04-injection.png` |
-| 5 | **🌐 Deep research** — toggle web mode; watch the live de-identified queries and the Sources list. | `assets/05-deep-research.png` |
-| 6 | **Forensic log** — show a row of `apps/server/artifacts/perf-log.jsonl` matching the on-screen tokens/sec. | `assets/06-perflog.png` |
+### Step 1 — Offline proof
+
+The status bar always reads **"On-device · nothing leaves your network."** Disconnect the network cable, run the demo, and the full cited answer still arrives — because every byte of inference is local.
+
+### Step 2 — Phone upload
+
+Pick any PDF, Word doc, or plain-text file from the phone's native picker. The server streams back an instant per-file confirmation (title + character count). No cloud relay, no re-upload: the raw bytes go directly over LAN to the laptop.
+
+### Step 3 — Cited document answer
+
+Ask a cross-document question in plain language. The model reads the **whole corpus at once** and returns a structured answer with inline **`[DOC-xx]`** citation chips you can tap to trace every claim back to its source document.
+
+<p align="center">
+  <img src="assets/image.png" width="320" alt="Sanctum — on-device cited document analysis" />
+</p>
+
+> *The response above was produced entirely on-device (MedPsy-1.7B, CPU). The green lock icon and "nothing leaves your network" banner confirm zero remote AI calls.*
+
+---
+
+### Step 4 — Injection refused
+
+Load [`sample-records/03-scanned-note-with-injection.md`](./apps/server/docs/sample-records/03-scanned-note-with-injection.md) — a document with a hidden re-instruction attack planted inside it. The answer still cites the real medical facts correctly and carries a visible **⚠ disclaimer banner**: *"This analysis is based on the provided synthetic record … No real patient data exists; treatment must be individualized by a clinician."* The injected instruction is treated as data and silently discarded.
+
+---
+
+### Step 5 — 🌐 Deep research (opt-in)
+
+Toggle the **"Deep research across the web"** button to fuse the private record with current medical literature — **without ever uploading the document**.
+
+**Phase 1 — live activity log.** The app shows every step as it happens: *Starting deep research → Analyzing the document → Searching the web → Reading N web sources → Compiling results locally.* Only de-identified, PHI-scrubbed query strings leave the device.
+
+<p align="center">
+  <img src="assets/image2.png" width="320" alt="Sanctum — deep research live activity log" />
+</p>
+
+**Phase 2 — cited synthesis + Sources list.** The answer combines patient-record facts (cited as `[DOC-01]`) with current literature findings. A collapsible **Sources** section lists every web reference with a clickable title — `[WEB-1]` through `[WEB-6]` in the example below.
+
+<p align="center">
+  <img src="assets/image3.png" width="320" alt="Sanctum — web citations and Sources list" />
+</p>
+
+> *Six peer-reviewed and clinical sources surfaced automatically; the disclaimer banner reminds the user the record is synthetic and output is not medical advice.*
+
+---
+
+### Step 6 — Forensic log
+
+Every inference call appends a JSONL row to `apps/server/artifacts/perf-log.jsonl` containing the SHA-256 prompt hash, TTFT, tokens/sec, token counts, and backend device. Cross-reference the on-screen performance line against the log to verify the numbers are real and unedited.
 
 ---
 
@@ -386,7 +425,7 @@ All scripts run from the **repo root**; each just `cd`s into the right app.
 
 ## Reproducibility, licensing & disclaimers
 
-**Reproducibility (for judges)**
+**Reproducibility**
 
 - **SDK:** pinned `@qvac/sdk@0.12.2` (see `apps/server/package.json`).
 - **Models:** Apache-2.0 GGUFs from `huggingface.co/qvac`; checksums in `apps/server/models/SHA256SUMS.txt`.
