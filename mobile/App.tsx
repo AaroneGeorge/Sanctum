@@ -10,10 +10,12 @@
  * (POST /upload) — phones can't reliably parse PDFs/DOCX. You get an instant per-file confirmation
  * (char count) before asking, so you can see the upload worked.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   KeyboardAvoidingView,
+  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -114,6 +116,22 @@ type PickedDoc = { name: string; chars: number; ok: boolean; error?: string; con
 type Health = { model: string; device: string } | null;
 type Stats = { tokensPerSecond?: number; timeToFirstToken?: number; backendDevice?: string } | null;
 
+/** A general-medical web source returned by the web-augmented mode (referenced inline as [WEB-n]). */
+type WebSource = { id: string; title: string; url: string; snippet?: string };
+
+/** One step in the agent's live activity log (streamed from /ask/web as it works). */
+type AgentStep = { phase: string; message: string };
+
+/** Final payload of the streaming /ask/web endpoint — the /ask body plus `sources`. */
+type AskWebResult = {
+  answer: string;
+  citations: string[];
+  sources: WebSource[];
+  injectionSuspected?: boolean;
+  truncated?: boolean;
+  stats?: Stats;
+};
+
 /** One bubble in the conversation. Assistant bubbles carry the answer's metadata (citations, flags). */
 type Msg = {
   id: string;
@@ -125,25 +143,349 @@ type Msg = {
   injection?: boolean;
   truncated?: boolean;
   stats?: Stats;
+  // ── web-augmented mode ──
+  mode?: 'web'; // marks a deep-research bubble (drives the activity log UI + Sources list)
+  steps?: AgentStep[]; // live agent activity (Analyzing / Searching / Reading / Composing)
+  sources?: WebSource[]; // WEB-n cards rendered under the answer
 };
 
 const fmtChars = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`);
 
-/** Render an answer, highlighting [DOC-xx] citation tags inline. */
-function AnswerText({ text }: { text: string }) {
-  const parts = text.split(/(\[DOC-[^\]]+\])/g);
+/**
+ * Web-augmented "deep research" ask. Streams the agent's progress over Server-Sent Events and surfaces
+ * each phase LIVE via onStatus (Analyzing… / Searching… / Composing…), then resolves with the final
+ * answer + web sources.
+ *
+ * Uses XMLHttpRequest, not fetch: RN's XHR reliably exposes the response body INCREMENTALLY through
+ * `responseText` as bytes arrive, so each step is shown the moment it happens instead of all at once at
+ * the end. (expo/fetch's ReadableStream buffers on some devices, which made progress appear only after
+ * the answer was ready.)
+ */
+function askWeb(
+  question: string,
+  documents: { title: string; content: string }[],
+  history: { role: string; content: string }[],
+  onStatus: (step: AgentStep) => void,
+  signal?: AbortSignal,
+): Promise<AskWebResult> {
+  return new Promise<AskWebResult>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${SERVER}/ask/web`);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.setRequestHeader('Accept', 'text/event-stream');
+
+    let buffer = '';
+    let consumed = 0;
+    let settled = false;
+    let final: AskWebResult | null = null;
+
+    const onAbort = () => {
+      try {
+        xhr.abort();
+      } catch {}
+    };
+    const cleanup = () => signal?.removeEventListener?.('abort', onAbort);
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(err);
+    };
+    const succeed = (r: AskWebResult) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(r);
+    };
+
+    if (signal) {
+      if (signal.aborted) return onAbort();
+      signal.addEventListener?.('abort', onAbort);
+    }
+
+    // Drain any complete SSE frames (\n\n-delimited) that arrived in responseText since last time.
+    const drain = () => {
+      const text = xhr.responseText;
+      if (text.length > consumed) {
+        buffer += text.slice(consumed);
+        consumed = text.length;
+      }
+      let sep: number;
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        const dataLine = frame
+          .split('\n')
+          .map((l) => (l.startsWith('data:') ? l.slice(5).trim() : ''))
+          .filter(Boolean)
+          .join('');
+        if (!dataLine) continue; // comment (": keep-alive") or non-data frame
+        let evt: any;
+        try {
+          evt = JSON.parse(dataLine);
+        } catch {
+          continue;
+        }
+        if (evt.error) return fail(new Error(evt.error));
+        if (evt.answer != null) {
+          final = {
+            answer: evt.answer ?? '',
+            citations: evt.citations ?? [],
+            sources: evt.sources ?? [],
+            injectionSuspected: !!evt.injectionSuspected,
+            truncated: !!evt.truncated,
+            stats: evt.stats ?? null,
+          };
+        } else if (evt.message) {
+          onStatus({ phase: String(evt.phase ?? ''), message: String(evt.message) });
+        }
+      }
+    };
+
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState === 3) {
+        drain(); // LOADING — partial body available; this is what makes progress live
+      } else if (xhr.readyState === 4) {
+        drain();
+        if (xhr.status === 0) {
+          const e = new Error('aborted');
+          e.name = 'AbortError';
+          return fail(e);
+        }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          let detail = `Server ${xhr.status}`;
+          try {
+            detail = JSON.parse(xhr.responseText)?.error ?? detail;
+          } catch {}
+          return fail(new Error(detail));
+        }
+        if (final) succeed(final);
+        else fail(new Error('stream ended before a final answer'));
+      }
+    };
+    xhr.onerror = () => fail(new Error('network error — check the laptop server and Wi-Fi'));
+
+    xhr.send(JSON.stringify({ question, documents, history }));
+  });
+}
+
+/** Clean domain for a source card, e.g. "https://www.ncbi.nlm.nih.gov/x" -> "ncbi.nlm.nih.gov". */
+function domainOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return url.replace(/^https?:\/\//, '').split('/')[0] ?? url;
+  }
+}
+
+/**
+ * Render ONE line of inline markdown: **bold** spans plus [DOC-xx] / [WEB-n] citations. [DOC] is blue,
+ * [WEB] is an amber tappable link to its source URL. Returns an array of <Text> nodes for a parent <Text>.
+ */
+function renderInline(text: string, urlById: Map<string, string>, kp: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  // One pass over **bold**, *italic*, and [DOC-xx]/[WEB-n] citation tokens; plain text fills the gaps.
+  const re = /(\*\*[^*]+\*\*)|(\*[^*\n]+\*)|(\[(?:DOC|WEB)-[^\]]+\])/g;
+  let last = 0;
+  let i = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(<Text key={`${kp}-t${i}`}>{text.slice(last, m.index)}</Text>);
+    const tok = m[0];
+    const key = `${kp}-m${i}`;
+    if (m[1]) {
+      out.push(
+        <Text key={key} style={styles.bold}>
+          {tok.slice(2, -2)}
+        </Text>,
+      );
+    } else if (m[2]) {
+      out.push(
+        <Text key={key} style={styles.italic}>
+          {tok.slice(1, -1)}
+        </Text>,
+      );
+    } else if (/^\[DOC-/.test(tok)) {
+      out.push(
+        <Text key={key} style={styles.cite}>
+          {tok}
+        </Text>,
+      );
+    } else {
+      const url = urlById.get(tok.slice(1, -1));
+      out.push(
+        <Text key={key} style={styles.citeWeb} onPress={url ? () => Linking.openURL(url).catch(() => {}) : undefined}>
+          {tok}
+        </Text>,
+      );
+    }
+    last = m.index + tok.length;
+    i++;
+  }
+  if (last < text.length) out.push(<Text key={`${kp}-t${i}`}>{text.slice(last)}</Text>);
+  return out;
+}
+
+/**
+ * Render the model's answer as lightweight markdown: `#`/`##`/`###` and fully-bold lines become bold
+ * subheadings, `- `/`* `/`1.` lines become bullet / numbered rows, blank lines separate paragraphs, and
+ * inline `**bold**` + `[DOC-xx]`/`[WEB-n]` citations are preserved (WEB markers open their source).
+ */
+function FormattedAnswer({ text, sources }: { text: string; sources?: WebSource[] }) {
+  const urlById = new Map((sources ?? []).map((s) => [s.id, s.url]));
+  const blocks: ReactNode[] = [];
+
+  text
+    .replace(/\r/g, '')
+    .split('\n')
+    .forEach((raw, i) => {
+      const line = raw.trim();
+      if (!line) return; // blank line → spacing comes from block margins
+
+      const heading = line.match(/^#{1,4}\s+(.*)$/);
+      const fullBold = line.match(/^\*\*(.+?)\*\*:?$/);
+      if (heading || fullBold) {
+        const inner = (heading ? heading[1] : fullBold![1]).replace(/[*#]+$/g, '').trim();
+        blocks.push(
+          <Text key={i} style={styles.h}>
+            {renderInline(inner, urlById, `h${i}`)}
+          </Text>,
+        );
+        return;
+      }
+
+      const bullet = line.match(/^[-*•]\s+(.*)$/);
+      if (bullet) {
+        blocks.push(
+          <View key={i} style={styles.liRow}>
+            <Text style={styles.liDot}>•</Text>
+            <Text style={[styles.answer, styles.liText]}>{renderInline(bullet[1], urlById, `b${i}`)}</Text>
+          </View>,
+        );
+        return;
+      }
+
+      const numbered = line.match(/^(\d+)[.)]\s+(.*)$/);
+      if (numbered) {
+        blocks.push(
+          <View key={i} style={styles.liRow}>
+            <Text style={styles.liNum}>{numbered[1]}.</Text>
+            <Text style={[styles.answer, styles.liText]}>{renderInline(numbered[2], urlById, `n${i}`)}</Text>
+          </View>,
+        );
+        return;
+      }
+
+      blocks.push(
+        <Text key={i} style={[styles.answer, styles.para]}>
+          {renderInline(line, urlById, `p${i}`)}
+        </Text>,
+      );
+    });
+
+  return <View>{blocks}</View>;
+}
+
+/** A subtly pulsing wrapper so the current activity step reads as live — no spinner, just motion. */
+function Pulse({ children }: { children: ReactNode }) {
+  const o = useRef(new Animated.Value(0.35)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(o, { toValue: 1, duration: 650, useNativeDriver: true }),
+        Animated.timing(o, { toValue: 0.35, duration: 650, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [o]);
+  return <Animated.View style={{ opacity: o }}>{children}</Animated.View>;
+}
+
+/**
+ * Perplexity-style agent activity log: grayed lines describing what the agent is doing — Analyzing… /
+ * Searching the web: … / Reading N sources… / Composing… — streamed live. While `live`, the last line is
+ * shown active (brighter + a pulsing dot) instead of a loader.
+ */
+function ActivitySteps({ steps, live }: { steps: AgentStep[]; live?: boolean }) {
   return (
-    <Text style={styles.answer}>
-      {parts.map((p, i) =>
-        /^\[DOC-/.test(p) ? (
-          <Text key={i} style={styles.cite}>
-            {p}
-          </Text>
-        ) : (
-          <Text key={i}>{p}</Text>
-        ),
+    <View style={styles.stepsWrap}>
+      {steps.map((s, i) => {
+        const isActive = !!live && i === steps.length - 1;
+        const icon = s.phase === 'search' ? '🌐' : '•';
+        const text = s.message.replace(/…+$/, '');
+        return (
+          <View key={i} style={styles.stepRow}>
+            {isActive ? (
+              <Pulse>
+                <Text style={styles.stepIcon}>{icon}</Text>
+              </Pulse>
+            ) : (
+              <Text style={styles.stepIcon}>{icon}</Text>
+            )}
+            <Text style={[styles.stepText, isActive && styles.stepTextActive]} numberOfLines={2}>
+              {text}
+              {isActive ? '…' : ''}
+            </Text>
+          </View>
+        );
+      })}
+    </View>
+  );
+}
+
+/** Collapsed "Researched the web" disclosure that expands to the full activity log on a finished answer. */
+function ResearchTrace({ steps }: { steps: AgentStep[] }) {
+  const [open, setOpen] = useState(false);
+  if (!steps.length) return null;
+  return (
+    <View style={styles.traceWrap}>
+      <Pressable style={styles.discloseRow} onPress={() => setOpen((v) => !v)} hitSlop={6}>
+        <Text style={styles.traceHeader}>🌐 Researched the web</Text>
+        <Text style={styles.chevron}>{open ? '▾' : '▸'}</Text>
+      </Pressable>
+      {open && (
+        <View style={styles.traceBody}>
+          <ActivitySteps steps={steps} />
+        </View>
       )}
-    </Text>
+    </View>
+  );
+}
+
+/**
+ * Perplexity-style collapsible Sources: a tappable, underlined "Sources" header with a count that
+ * expands to a NUMBERED list of the web links used — each card opens its URL when tapped.
+ */
+function Sources({ sources }: { sources: WebSource[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={styles.sourcesWrap}>
+      <Pressable style={styles.discloseRow} onPress={() => setOpen((v) => !v)} hitSlop={6}>
+        <Text style={styles.sourcesHeader}>Sources</Text>
+        <View style={styles.sourcesCount}>
+          <Text style={styles.sourcesCountText}>{sources.length}</Text>
+        </View>
+        <Text style={styles.chevron}>{open ? '▾' : '▸'}</Text>
+      </Pressable>
+      {open &&
+        sources.map((s) => (
+          <Pressable key={s.id} style={styles.sourceCard} onPress={() => Linking.openURL(s.url).catch(() => {})}>
+            <View style={styles.sourceBadge}>
+              <Text style={styles.sourceBadgeText}>{s.id.replace('WEB-', '')}</Text>
+            </View>
+            <View style={styles.flex}>
+              <Text style={styles.sourceTitle} numberOfLines={2}>
+                {s.title || domainOf(s.url)}
+              </Text>
+              <Text style={styles.sourceDomain} numberOfLines={1}>
+                {domainOf(s.url)}
+              </Text>
+            </View>
+            <Text style={styles.sourceOpen}>↗</Text>
+          </Pressable>
+        ))}
+    </View>
   );
 }
 
@@ -163,10 +505,15 @@ function Bubble({ msg }: { msg: Msg }) {
     <View style={styles.botRow}>
       <View style={[styles.botBubble, msg.error && styles.botBubbleError]}>
         {msg.pending ? (
-          <View style={styles.loadingRow}>
-            <ActivityIndicator color="#60a5fa" />
-            <Text style={styles.muted}>  Reasoning over your documents, locally…</Text>
-          </View>
+          msg.mode === 'web' ? (
+            // Live agent activity (no loader) — grayed lines describing what the agent is doing now.
+            <ActivitySteps steps={msg.steps ?? []} live />
+          ) : (
+            <View style={styles.loadingRow}>
+              <ActivityIndicator color="#60a5fa" />
+              <Text style={styles.muted}>{'  '}Reasoning over your documents, locally…</Text>
+            </View>
+          )
         ) : msg.error ? (
           <Text style={styles.errorText}>{msg.text}</Text>
         ) : (
@@ -181,7 +528,8 @@ function Bubble({ msg }: { msg: Msg }) {
                 <Text style={styles.noteText}>ℹ Long documents — only the portion that fits the context window was analyzed.</Text>
               </View>
             )}
-            <AnswerText text={msg.text} />
+            {msg.mode === 'web' && !!msg.steps?.length && <ResearchTrace steps={msg.steps} />}
+            <FormattedAnswer text={msg.text} sources={msg.sources} />
             {!!msg.citations?.length && (
               <View style={styles.citeRow}>
                 {msg.citations.map((c) => (
@@ -191,6 +539,7 @@ function Bubble({ msg }: { msg: Msg }) {
                 ))}
               </View>
             )}
+            {!!msg.sources?.length && <Sources sources={msg.sources} />}
             {msg.stats && (
               <Text style={styles.perf}>
                 {msg.stats.backendDevice ?? '—'}
@@ -215,10 +564,19 @@ function Chat() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
+  const [webMode, setWebMode] = useState(false); // 🌐 opt-in web-augmented "deep research" (default off)
 
   const scrollRef = useRef<ScrollView>(null);
   const idRef = useRef(0);
   const nextId = () => `m${idRef.current++}`;
+  const abortRef = useRef<AbortController | null>(null); // cancels an in-flight web stream
+  // id of the freshly-sent question to scroll to the TOP of the viewport ONCE (so the doctor reads the
+  // answer from its start). We deliberately do NOT auto-scroll to the end on every content change —
+  // that yanked the view down while the answer streamed and when expanding the Sources/trace dropdowns.
+  const scrollTargetRef = useRef<string | null>(null);
+
+  // Tear down any active web stream when the chat unmounts.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   // Probe the laptop server for the connection + model. Runs on mount, and again whenever the doctor
   // taps the status pill — so an "Offline" reading can be retried once the laptop comes up.
@@ -238,7 +596,7 @@ function Chat() {
     checkHealth();
   }, [checkHealth]);
 
-  // (Auto-scroll is handled by the thread's onContentSizeChange — see the conversation ScrollView.)
+  // (On send we scroll the new question to the top once — see the conversation ScrollView's onLayout.)
 
   async function pickDocs() {
     setError('');
@@ -285,6 +643,7 @@ function Chat() {
   }
 
   function newChat() {
+    abortRef.current?.abort();
     setMessages([]);
     setError('');
   }
@@ -301,48 +660,94 @@ function Chat() {
       .filter((m) => !m.pending && !m.error)
       .map((m) => ({ role: m.role, content: m.text }));
 
+    const docPayload = okDocs.map((d) => ({ title: d.name, content: d.content }));
     const userMsg: Msg = { id: nextId(), role: 'user', text: q };
     const pendingId = nextId();
-    setMessages((prev) => [...prev, userMsg, { id: pendingId, role: 'assistant', text: '', pending: true }]);
+    const pendingMsg: Msg = webMode
+      ? {
+          id: pendingId,
+          role: 'assistant',
+          text: '',
+          pending: true,
+          mode: 'web',
+          steps: [{ phase: '', message: 'Starting deep research' }],
+        }
+      : { id: pendingId, role: 'assistant', text: '', pending: true };
+    scrollTargetRef.current = userMsg.id; // pin the new question to the top once it lays out
+    setMessages((prev) => [...prev, userMsg, pendingMsg]);
     setInput('');
     setSending(true);
 
     try {
-      const res = await fetch(`${SERVER}/ask`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question: q,
-          documents: okDocs.map((d) => ({ title: d.name, content: d.content })),
+      if (webMode) {
+        // Web-augmented path: stream the agent's progress into the pending bubble's single status line,
+        // then fill in the answer + sources when the `done` frame arrives.
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const result = await askWeb(
+          q,
+          docPayload,
           history,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error ?? `Server ${res.status}`);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === pendingId
-            ? {
-                ...m,
-                pending: false,
-                text: data.answer ?? '',
-                citations: data.citations ?? [],
-                injection: !!data.injectionSuspected,
-                truncated: !!data.truncated,
-                stats: data.stats ?? null,
-              }
-            : m,
-        ),
-      );
+          (step) =>
+            setMessages((prev) =>
+              prev.map((m) => (m.id === pendingId ? { ...m, steps: [...(m.steps ?? []), step] } : m)),
+            ),
+          controller.signal,
+        );
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === pendingId
+              ? {
+                  ...m,
+                  pending: false,
+                  text: result.answer,
+                  citations: result.citations ?? [],
+                  sources: result.sources ?? [],
+                  injection: !!result.injectionSuspected,
+                  truncated: !!result.truncated,
+                  stats: result.stats ?? null,
+                }
+              : m,
+          ),
+        );
+      } else {
+        // On-device-only path (unchanged): one /ask request/response.
+        const res = await fetch(`${SERVER}/ask`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question: q, documents: docPayload, history }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error ?? `Server ${res.status}`);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === pendingId
+              ? {
+                  ...m,
+                  pending: false,
+                  text: data.answer ?? '',
+                  citations: data.citations ?? [],
+                  injection: !!data.injectionSuspected,
+                  truncated: !!data.truncated,
+                  stats: data.stats ?? null,
+                }
+              : m,
+          ),
+        );
+      }
     } catch (e: any) {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === pendingId
-            ? { ...m, pending: false, error: true, text: `${e?.message ?? 'request failed'} — check the laptop server and Wi-Fi (${SERVER}).` }
-            : m,
-        ),
-      );
+      // A user-cancelled stream (New chat / unmount) is not an error — it already cleared the bubble.
+      if (e?.name !== 'AbortError') {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === pendingId
+              ? { ...m, pending: false, error: true, text: `${e?.message ?? 'request failed'} — check the laptop server and Wi-Fi (${SERVER}).` }
+              : m,
+          ),
+        );
+      }
     } finally {
+      abortRef.current = null;
       setSending(false);
     }
   }
@@ -408,13 +813,14 @@ function Chat() {
           </ScrollView>
         )}
 
-        {/* Conversation */}
+        {/* Conversation. No auto-scroll-to-end: instead we scroll the freshly-sent question to the top
+            once (via onLayout below), so the answer is read from its start and dropdown toggles / streamed
+            steps never yank the view. */}
         <ScrollView
           ref={scrollRef}
           style={styles.flex}
           contentContainerStyle={styles.thread}
           keyboardShouldPersistTaps="handled"
-          onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
         >
           {messages.length === 0 ? (
             <View style={styles.empty}>
@@ -428,7 +834,19 @@ function Chat() {
               <Text style={styles.emptyNote}>Your documents and questions never leave your local network — no cloud.</Text>
             </View>
           ) : (
-            messages.map((m) => <Bubble key={m.id} msg={m} />)
+            messages.map((m) => (
+              <View
+                key={m.id}
+                onLayout={(e) => {
+                  if (scrollTargetRef.current !== m.id) return;
+                  scrollTargetRef.current = null; // scroll exactly once for this question
+                  const y = e.nativeEvent.layout.y;
+                  requestAnimationFrame(() => scrollRef.current?.scrollTo({ y: Math.max(0, y - 8), animated: true }));
+                }}
+              >
+                <Bubble msg={m} />
+              </View>
+            ))
           )}
         </ScrollView>
 
@@ -439,9 +857,24 @@ function Chat() {
           <Pressable style={[styles.attach, extracting && styles.disabled]} onPress={pickDocs} disabled={extracting}>
             {extracting ? <ActivityIndicator color="#cbd5e1" size="small" /> : <Text style={styles.attachText}>＋</Text>}
           </Pressable>
+          {/* 🌐 toggle: web-augmented "deep research" mode (de-identified queries only). Default off. */}
+          <Pressable
+            style={[styles.webToggle, webMode && styles.webToggleOn]}
+            onPress={() => setWebMode((v) => !v)}
+            disabled={sending}
+            hitSlop={6}
+          >
+            <Text style={[styles.webToggleText, webMode && styles.webToggleTextOn]}>🌐</Text>
+          </Pressable>
           <TextInput
             style={styles.input}
-            placeholder={okCount > 0 ? 'Ask about these records…' : 'Add a document with + to begin'}
+            placeholder={
+              webMode
+                ? 'Deep research across the web…'
+                : okCount > 0
+                  ? 'Ask about these records…'
+                  : 'Add a document with + to begin'
+            }
             placeholderTextColor="#5b647a"
             value={input}
             onChangeText={setInput}
@@ -551,6 +984,62 @@ const styles = StyleSheet.create({
   citeChip: { backgroundColor: '#0b3b2e', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
   citeChipText: { color: '#6ee7b7', fontSize: 11, fontWeight: '700' },
   perf: { color: '#475065', fontSize: 10, marginTop: 10, fontFamily: 'monospace' },
+
+  // inline [WEB-n] marker — amber, distinct from blue [DOC] and green private-record chips
+  citeWeb: { color: '#fbbf24', fontWeight: '700' },
+
+  // markdown formatting
+  bold: { color: '#f1f5f9', fontWeight: '800' },
+  italic: { color: '#9aa3b2', fontStyle: 'italic' },
+  h: { color: '#f8fafc', fontSize: 15, fontWeight: '800', lineHeight: 22, marginTop: 12, marginBottom: 4 },
+  para: { marginBottom: 8 },
+  liRow: { flexDirection: 'row', marginBottom: 6, paddingRight: 4 },
+  liDot: { color: '#60a5fa', fontSize: 15, lineHeight: 23, marginRight: 8 },
+  liNum: { color: '#60a5fa', fontSize: 13, lineHeight: 23, marginRight: 8, fontWeight: '700', minWidth: 16 },
+  liText: { flex: 1 },
+
+  // live agent activity log (Perplexity-style) — grayed lines, current one brighter + pulsing
+  stepsWrap: { gap: 9 },
+  stepRow: { flexDirection: 'row', alignItems: 'flex-start' },
+  stepIcon: { fontSize: 12, lineHeight: 19, width: 20, color: '#6b7280' },
+  stepText: { color: '#6b7280', fontSize: 13, lineHeight: 19, flex: 1 },
+  stepTextActive: { color: '#cbd5e1' },
+
+  // shared collapsible disclosure header (Sources / research trace)
+  discloseRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  chevron: { color: '#5b647a', fontSize: 11, marginLeft: 2 },
+
+  // collapsed "researched the web" trace on a finished answer
+  traceWrap: { marginBottom: 10 },
+  traceHeader: { color: '#8a93a6', fontSize: 12, fontWeight: '700' },
+  traceBody: { marginTop: 8, paddingLeft: 2 },
+
+  // Perplexity-style collapsible Sources list
+  sourcesWrap: { marginTop: 14, gap: 8 },
+  sourcesHeader: { color: '#cbd5e1', fontSize: 13, fontWeight: '700', textDecorationLine: 'underline' },
+  sourcesCount: { backgroundColor: '#2a2410', borderRadius: 9, paddingHorizontal: 6, paddingVertical: 1, minWidth: 18, alignItems: 'center' },
+  sourcesCountText: { color: '#fbbf24', fontSize: 11, fontWeight: '800' },
+  sourceCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#0e1420',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#1e2733',
+    padding: 10,
+  },
+  sourceBadge: { width: 22, height: 22, borderRadius: 6, backgroundColor: '#3a2a08', alignItems: 'center', justifyContent: 'center' },
+  sourceBadgeText: { color: '#fbbf24', fontSize: 11, fontWeight: '800' },
+  sourceTitle: { color: '#e5e7eb', fontSize: 13, fontWeight: '600', lineHeight: 18 },
+  sourceDomain: { color: '#5b647a', fontSize: 11, marginTop: 2 },
+  sourceOpen: { color: '#5b647a', fontSize: 14 },
+
+  // composer 🌐 web-research toggle
+  webToggle: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#1f2937', alignItems: 'center', justifyContent: 'center' },
+  webToggleOn: { backgroundColor: '#1e3a8a' },
+  webToggleText: { fontSize: 18, opacity: 0.55 },
+  webToggleTextOn: { opacity: 1 },
 
   error: { color: '#fca5a5', fontSize: 12, paddingHorizontal: 16, paddingBottom: 6 },
 
