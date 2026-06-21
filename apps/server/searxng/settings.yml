@@ -1,0 +1,16 @@
+# Minimal SearXNG config for Sanctum's self-hosted, fully-offline web-search mode.
+# src/search.ts calls /search?format=json, so JSON output MUST be enabled here
+# (it is OFF in SearXNG's defaults). `use_default_settings: true` merges everything
+# else from the image defaults so this file only overrides what Sanctum needs.
+use_default_settings: true
+
+server:
+  # CHANGE this for any non-local deployment.
+  secret_key: "sanctum-change-me-please"
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json

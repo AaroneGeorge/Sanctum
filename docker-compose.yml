@@ -1,0 +1,61 @@
+# Sanctum — on-device inference server.
+#
+#   docker compose up --build                  # server only (100% offline)
+#   docker compose --profile websearch up      # + self-hosted SearXNG (opt-in web mode, no third party)
+#
+# Before the first run, download the model weights on the HOST (they are mounted in, not baked):
+#   npm run models             # or:  DL_4B=1 npm run models
+#
+# Compose-level knobs (model, device, ctx) are read from a root .env — see .env.example.
+services:
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    image: sanctum-server
+    container_name: sanctum-server
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: 8787
+      SANCTUM_MODEL: ${SANCTUM_MODEL:-medpsy-1.7b}
+      QVAC_DEVICE: ${QVAC_DEVICE:-cpu}
+      QVAC_CTX: ${QVAC_CTX:-8192}
+      QVAC_GPU_LAYERS: ${QVAC_GPU_LAYERS:-0}
+      QVAC_PREDICT: ${QVAC_PREDICT:-2048}
+    # Optional web-search keys (SEARCH_*). The file is optional; with nothing set the
+    # server stays 100% offline and makes zero external calls.
+    env_file:
+      - path: ./apps/server/.env
+        required: false
+    volumes:
+      # Large GGUF weights live on the host (gitignored) and are mounted read-only.
+      - ./apps/server/models:/app/apps/server/models:ro
+      # Forensic perf-log is written back to the host for inspection.
+      - ./apps/server/artifacts:/app/apps/server/artifacts
+    healthcheck:
+      # /health only responds once the model has finished loading, hence the long start_period.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 180s
+    restart: unless-stopped
+
+  # ── OPTIONAL: fully self-hosted web search (no third party sees even de-identified queries) ──
+  # Enable with:  docker compose --profile websearch up
+  # Then point the server at it via apps/server/.env:
+  #   SEARCH_PROVIDER=searxng
+  #   SEARCH_ENDPOINT=http://searxng:8080
+  searxng:
+    image: searxng/searxng:latest
+    container_name: sanctum-searxng
+    profiles: ["websearch"]
+    ports:
+      - "8080:8080"
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8080/
+    volumes:
+      # settings.yml enables JSON output, which src/search.ts requires (/search?format=json).
+      - ./apps/server/searxng:/etc/searxng:rw
+    restart: unless-stopped

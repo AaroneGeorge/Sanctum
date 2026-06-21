@@ -1,0 +1,33 @@
+{
+  "name": "@sanctum/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sanctum — a fully-offline, long-context private records analyst built on the QVAC SDK. Submission for the Tether QVAC 'Unleash Edge AI' hackathon (Track: General Purpose).",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.17"
+  },
+  "scripts": {
+    "doctor": "qvac doctor || npx --yes @qvac/cli doctor",
+    "models": "bash scripts/download-models.sh",
+    "smoke": "tsx src/smoke.ts",
+    "ask": "tsx src/agent.ts",
+    "serve": "tsx src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@qvac/sdk": "0.12.2",
+    "busboy": "^1.6.0",
+    "mammoth": "^1.12.0",
+    "unpdf": "^1.6.2",
+    "word-extractor": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/busboy": "^1.5.4",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

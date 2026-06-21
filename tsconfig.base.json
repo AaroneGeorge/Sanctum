@@ -1,10 +1,11 @@
 {
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "Shared TypeScript options for the monorepo. apps/server extends this; apps/mobile uses expo/tsconfig.base.",
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "lib": ["ES2023"],
-    "types": ["node"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
@@ -12,6 +13,5 @@
     "resolveJsonModule": true,
     "verbatimModuleSyntax": false,
     "noEmit": true
-  },
-  "include": ["src/**/*.ts"]
+  }
 }

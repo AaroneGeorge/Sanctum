@@ -1,0 +1,17 @@
+# Keep the Docker build context small + secret-free (build context is the repo root).
+**/node_modules
+.git
+.gitignore
+**/.expo
+**/dist
+**/web-build
+# Large model weights are mounted at runtime, never baked into the image.
+**/*.gguf
+# Generated/forensic artifacts are written back via a volume, not shipped.
+**/artifacts/*.jsonl
+**/artifacts/profiler.json
+# Never bake secrets — .env.example is intentionally NOT ignored.
+**/.env
+**/.env*.local
+*.log
+.DS_Store
