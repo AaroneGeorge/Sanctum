@@ -30,6 +30,7 @@
  *    a tiny promise-chain queue — concurrent phone requests wait instead of colliding.
  *  - Every request still writes a forensic row to artifacts/perf-log.jsonl via perflog.ts.
  */
+import './env'; // load .env FIRST (before ./search reads process.env) so web-search keys take effect
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { resolve } from 'node:path';
@@ -428,7 +429,7 @@ async function main() {
 
       try {
         // ── Phase 1: on-device query generation (MODEL CALL — through enqueue) ──
-        status('analyze', 'Analyzing the patient document…');
+        status('analyze', 'Analyzing the document…');
         let queries: string[] = [];
         if (webSearchAvailable()) {
           queries = await enqueue(() => generateSearchQueries(modelId, docs, question, LOG, model.name));
@@ -439,18 +440,18 @@ async function main() {
         let sources: WebSource[] = [];
         const sent = previewQueries(queries); // exactly what will leave the device, after de-identification
         if (sent.length) {
-          for (const q of sent) status('search', `Searching the web: ${q}…`);
+          status('search', 'Searching the web…');
           sources = await webSearch(queries);
           status(
             'read',
             sources.length
-              ? `Reading ${sources.length} source${sources.length === 1 ? '' : 's'}…`
-              : 'No web results — answering from your records only…',
+              ? `Reading ${sources.length} web source${sources.length === 1 ? '' : 's'}…`
+              : 'No web results — using your records…',
           );
         } else if (!webSearchAvailable()) {
-          status('offline', 'Web search not configured — answering from your records only…');
+          status('offline', 'Web search unavailable — using your records…');
         } else {
-          status('offline', 'No safe web queries — answering from your records only…');
+          status('offline', 'No safe web queries — using your records…');
         }
         if (closed) return clearInterval(ka);
 
@@ -463,7 +464,7 @@ async function main() {
         const fitted = fitDocsAndWeb(docs, sources, Math.max(1000, usableChars - historyChars));
 
         // ── Phase 3: synthesis (MODEL CALL — through enqueue) ──
-        status('compose', 'Composing the answer…');
+        status('compose', 'Compiling results locally…');
         const messages = buildWebAugmentedPrompt(fitted.docs, fitted.sources, history, question);
         const result = await enqueue(() =>
           profiledCompletion(

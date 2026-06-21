@@ -434,6 +434,24 @@ function ActivitySteps({ steps, live }: { steps: AgentStep[]; live?: boolean }) 
   );
 }
 
+/**
+ * Minimal LIVE status for a pending web answer: a single spinner + the CURRENT step message, updated
+ * progressively as status frames stream in (Analyzing… → Searching the web… → Compiling results locally…).
+ * Mirrors the on-device loadingRow so the bubble never collapses to bare dots.
+ */
+function LiveStatus({ steps }: { steps: AgentStep[] }) {
+  const current = steps.length ? steps[steps.length - 1].message.replace(/…+$/, '') : 'Starting deep research';
+  return (
+    <View style={styles.loadingRow}>
+      <ActivityIndicator color="#60a5fa" size="small" />
+      <Text style={styles.liveStatusText} numberOfLines={2}>
+        {'  '}
+        {current}…
+      </Text>
+    </View>
+  );
+}
+
 /** Collapsed "Researched the web" disclosure that expands to the full activity log on a finished answer. */
 function ResearchTrace({ steps }: { steps: AgentStep[] }) {
   const [open, setOpen] = useState(false);
@@ -506,8 +524,8 @@ function Bubble({ msg }: { msg: Msg }) {
       <View style={[styles.botBubble, msg.error && styles.botBubbleError]}>
         {msg.pending ? (
           msg.mode === 'web' ? (
-            // Live agent activity (no loader) — grayed lines describing what the agent is doing now.
-            <ActivitySteps steps={msg.steps ?? []} live />
+            // Minimal live status — one progressively-updated line of what the agent is doing now.
+            <LiveStatus steps={msg.steps ?? []} />
           ) : (
             <View style={styles.loadingRow}>
               <ActivityIndicator color="#60a5fa" />
@@ -974,6 +992,7 @@ const styles = StyleSheet.create({
 
   loadingRow: { flexDirection: 'row', alignItems: 'center' },
   muted: { color: '#5b647a', fontSize: 13 },
+  liveStatusText: { color: '#cbd5e1', fontSize: 14, lineHeight: 20, flexShrink: 1 },
 
   warn: { backgroundColor: '#3a2a08', borderRadius: 8, padding: 10, marginBottom: 10 },
   warnText: { color: '#fcd34d', fontSize: 12, lineHeight: 17 },
